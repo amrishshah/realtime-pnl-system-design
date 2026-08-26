@@ -1,0 +1,27 @@
+-- STAGE 10 EXERCISE: implement atomic total-PnL read-sum-write.
+--
+-- Design doc Sec.10: individual per-symbol PnL writes are plain HSET --
+-- different fields in the same hash never collide, so no coordination is
+-- needed there. But an aggregate "total PnL across the whole portfolio"
+-- field DOES need atomicity: two symbols updating concurrently could both
+-- read a stale total and clobber each other's write. A Redis Lua script
+-- (EVAL) runs atomically -- no other command executes on this Redis
+-- instance while the script runs -- so this is the one place in the whole
+-- design that actually needs one.
+--
+-- KEYS[1] = the client's hash key, e.g. "client:{client_id}"
+--
+-- Implement:
+--   1. HGETALL KEYS[1] to read every field currently in the hash.
+--   2. Each non-"total" field holds a JSON blob like
+--      {"pnl": "123.45", "price": "...", "qty": "..."} -- parse out the
+--      "pnl" value and sum it across all symbol fields (skip the "total"
+--      field itself, or you'll double-count on every call). cjson is
+--      available in Redis's Lua environment: cjson.decode(value).
+--   3. HSET KEYS[1] "total" <the computed sum, as a string>.
+--   4. Return the computed sum.
+--
+-- This script must be self-contained -- it can't call back into Python
+-- mid-script. Use redis.call() for both the read and the write.
+
+return redis.error_reply("Stage 10: implement total_pnl.lua")

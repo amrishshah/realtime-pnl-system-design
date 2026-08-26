@@ -1,0 +1,35 @@
+[project]
+name = "pnl"
+version = "0.1.0"
+description = "Real-time PnL calculation service — staged, codecrafters-style build"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "asyncmy>=0.2.9",
+    "redis>=5.0",
+    "aiokafka>=0.11",
+    "clickhouse-connect>=0.7",
+    "mmh3>=5.0",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.27",
+    "websockets>=13.0",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["pnl*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
