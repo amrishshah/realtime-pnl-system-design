@@ -17,6 +17,20 @@ After handing a tick to the dispatcher, the consumer waits (bounded by
 the next value. Without this, `handle_tick` returning right after spawning
 tasks would let every tick add another full round of waiting per-client
 tasks — the queue would just move one layer down.
+
+Ordering is by event-time, not arrival (§12): ticks from jittery or
+multi-source feeds can arrive out of order, and a naive "last one wins"
+would let an older price overwrite a newer one. A tick is accepted only if
+its event_time is strictly newer than the held one. `_latest[symbol]` is
+therefore always the newest event-time accepted, so a rejected tick's
+lateness is measured against it:
+  - within `watermark_lateness_seconds` -> nearby reordering
+    (`dropped_out_of_order`)
+  - beyond it                         -> a genuine straggler
+    (`dropped_late`)
+Both are dropped on this live path — the next fresh tick self-heals the
+view (§9); the split is for observability. The ClickHouse history path
+applies none of this and keeps every tick.
 """
 from __future__ import annotations
 
@@ -41,8 +55,19 @@ class SymbolCoalescer:
         self._latest: dict[str, Tick] = {}
         self._events: dict[str, asyncio.Event] = {}
         self._consumers: dict[str, asyncio.Task] = {}
+        self.dropped_out_of_order = 0
+        self.dropped_late = 0
 
     async def submit(self, tick: Tick) -> None:
+        held = self._latest.get(tick.symbol)
+        if held is not None and tick.event_time <= held.event_time:
+            lateness = (held.event_time - tick.event_time).total_seconds()
+            if lateness > self.watermark_lateness_seconds:
+                self.dropped_late += 1
+            else:
+                self.dropped_out_of_order += 1
+            return
+
         self._latest[tick.symbol] = tick
         self._events.setdefault(tick.symbol, asyncio.Event()).set()
         self._ensure_consumer(tick.symbol)

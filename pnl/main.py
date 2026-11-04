@@ -28,11 +28,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 logger = logging.getLogger("pnl")
 
 _dispatcher = None
+_coalescer = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _dispatcher
+    global _dispatcher, _coalescer
 
     redis_client = get_redis()
     pool = await get_pool()
@@ -65,8 +66,11 @@ async def lifespan(app: FastAPI):
     )
     _dispatcher = dispatcher
     coalescer = SymbolCoalescer(
-        dispatcher, max_drain_wait_seconds=settings.coalescer_max_drain_wait_seconds
+        dispatcher,
+        watermark_lateness_seconds=settings.watermark_lateness_seconds,
+        max_drain_wait_seconds=settings.coalescer_max_drain_wait_seconds,
     )
+    _coalescer = coalescer
     raw_sink = RawTickSink(ch_client)
 
     async def ingest(tick: Tick) -> None:
@@ -95,7 +99,7 @@ async def health() -> dict[str, str]:
 
 @app.get("/metrics")
 async def metrics() -> dict[str, int]:
-    """Fan-out dispatcher task counters (Stage 9)."""
+    """Fan-out task counters (Stage 9) and live-path tick drops (Stage 12)."""
     if _dispatcher is None:
         raise HTTPException(status_code=503, detail="fan-out dispatcher not wired yet")
     return {
@@ -103,4 +107,6 @@ async def metrics() -> dict[str, int]:
         "tasks_completed": _dispatcher.tasks_completed,
         "tasks_failed": _dispatcher.tasks_failed,
         "tasks_in_flight": _dispatcher.tasks_in_flight,
+        "ticks_dropped_out_of_order": _coalescer.dropped_out_of_order,
+        "ticks_dropped_late": _coalescer.dropped_late,
     }

@@ -40,6 +40,11 @@ docstring addition):
   into `self.dropped_out_of_order` (nearby) vs `self.dropped_late`
   (genuine straggler) — both still get dropped; the split is for metrics.
 
+Ingestion (`pnl/ws/server.py`) normalizes a zone-less `event_time` to UTC
+and stamps `received_at` (processing time): Python can't compare naive and
+aware datetimes, so a mix would crash the comparison. `GET /metrics` reports
+`ticks_dropped_out_of_order` and `ticks_dropped_late`.
+
 `pnl/history/clickhouse_sink.py` (Stage 6) is **not** touched — it must
 keep accepting every tick unconditionally.
 

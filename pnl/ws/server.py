@@ -6,12 +6,12 @@ live."""
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from pnl.common.events import Tick
 
@@ -39,12 +39,22 @@ def init_reconnect(cache: "ReconnectCache", manager: "ConnectionManager") -> Non
 
 
 class TickIn(BaseModel):
-    symbol: str
-    price: Decimal
+    symbol: str = Field(min_length=1, max_length=16)
+    price: Decimal = Field(gt=0)
     event_time: datetime
 
     def to_domain(self) -> Tick:
-        return Tick(symbol=self.symbol, price=self.price, event_time=self.event_time)
+        # Ordering compares event-times, and Python can't compare naive with
+        # aware datetimes: treat a zone-less timestamp as UTC.
+        event_time = self.event_time
+        if event_time.tzinfo is None:
+            event_time = event_time.replace(tzinfo=timezone.utc)
+        return Tick(
+            symbol=self.symbol,
+            price=self.price,
+            event_time=event_time,
+            received_at=datetime.now(timezone.utc),
+        )
 
 
 @router.post("/ticks", status_code=202)
