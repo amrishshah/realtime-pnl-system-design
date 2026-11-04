@@ -10,7 +10,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
 from pnl.common.events import Tick
@@ -49,14 +49,17 @@ class TickIn(BaseModel):
 
 @router.post("/ticks", status_code=202)
 async def ingest_tick(tick_in: TickIn) -> dict[str, str]:
-    assert _tick_handler is not None, "tick handler not initialized — app startup did not run"
+    if _tick_handler is None:
+        raise HTTPException(status_code=503, detail="tick pipeline not wired yet")
     await _tick_handler(tick_in.to_domain())
     return {"status": "accepted"}
 
 
 @router.websocket("/ws/{client_id}")
 async def websocket_endpoint(websocket: WebSocket, client_id: str) -> None:
-    assert _reconnect_cache is not None and _connection_manager is not None
+    if _reconnect_cache is None or _connection_manager is None:
+        await websocket.close(code=1013, reason="reconnect cache not wired yet")
+        return
     await websocket.accept()
 
     # Stage 10: reconnect is a cheap read, not a wait for the next tick.
