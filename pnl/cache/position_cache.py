@@ -1,37 +1,78 @@
 """
-STAGE 3 EXERCISE — implement PositionCache.get().
+Read-through cache for a client's position (design doc §3).
 
-Design doc §3: buy price and quantity come from Redis via read-through — on
-a cache miss, fall back to MySQL and populate Redis so the next lookup is
-fast. Current price is NOT this cache's job (it's free, already in the tick
-payload, handled entirely in the fan-out path from Stage 4 onward).
+Quantity and average buy price come from Redis (`position:{client}:{symbol}`,
+kept fresh by the CDC position projector). On a miss, fall back to MySQL —
+the source of truth — and backfill Redis so the next lookup is a hit.
+Current price is not this cache's concern: it's already in the tick.
 
-What to implement:
-1. `HGETALL position:{client_id}:{symbol}` on Redis. If both `quantity` and
-   `avg_buy_price` fields are present, build and return a PositionSnapshot
-   from them — cache hit, no MySQL involved.
-2. On a miss, `SELECT quantity, avg_buy_price FROM positions WHERE
-   client_id=%s AND symbol=%s`. If no row, the client doesn't hold this
-   position — return None.
-3. If a row was found, backfill Redis with `HSET position:{client_id}:{symbol}`
-   (so the next call is a cache hit), then return the PositionSnapshot.
-
-This function should only ever be called for a symbol that already passed
-the Bloom filter check (that gating happens in the fan-out dispatcher,
-Stage 4) — but it doesn't need to know or enforce that; it's a correct,
-self-contained read-through cache either way.
+Callers only reach this for symbols that passed the Bloom filter gate, but
+the cache is correct on its own either way.
 """
 from __future__ import annotations
+
+from decimal import Decimal
 
 import asyncmy
 import redis.asyncio as redis
 
 from pnl.common.events import PositionSnapshot
 
+# Backfill only if the key is still absent. If the CDC projector wrote a
+# value between our MySQL read and this write, that value is at least as new
+# as ours — never overwrite it with what may be a staler read.
+_BACKFILL_IF_ABSENT = """
+if redis.call('EXISTS', KEYS[1]) == 0 then
+    redis.call('HSET', KEYS[1], 'quantity', ARGV[1], 'avg_buy_price', ARGV[2])
+    return 1
+end
+return 0
+"""
+
+
+def position_key(client_id: str, symbol: str) -> str:
+    return f"position:{client_id}:{symbol}"
+
 
 class PositionCache:
     def __init__(self, redis_client: redis.Redis, mysql_pool: asyncmy.Pool) -> None:
-        raise NotImplementedError("Stage 3: implement PositionCache.__init__")
+        self.redis = redis_client
+        self.pool = mysql_pool
+        self._backfill = redis_client.register_script(_BACKFILL_IF_ABSENT)
 
     async def get(self, client_id: str, symbol: str) -> PositionSnapshot | None:
-        raise NotImplementedError("Stage 3: implement PositionCache.get")
+        key = position_key(client_id, symbol)
+        cached = await self.redis.hgetall(key)
+        if "quantity" in cached and "avg_buy_price" in cached:
+            return PositionSnapshot(
+                client_id=client_id,
+                symbol=symbol,
+                quantity=Decimal(cached["quantity"]),
+                avg_buy_price=Decimal(cached["avg_buy_price"]),
+            )
+
+        row = await self._load_from_mysql(client_id, symbol)
+        if row is None:
+            return None
+
+        quantity, avg_buy_price = Decimal(row[0]), Decimal(row[1])
+        await self._backfill(keys=[key], args=[str(quantity), str(avg_buy_price)])
+        return PositionSnapshot(
+            client_id=client_id, symbol=symbol, quantity=quantity, avg_buy_price=avg_buy_price
+        )
+
+    async def _load_from_mysql(self, client_id: str, symbol: str):
+        async with self.pool.acquire() as conn:
+            try:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT quantity, avg_buy_price FROM positions "
+                        "WHERE client_id = %s AND symbol = %s",
+                        (client_id, symbol),
+                    )
+                    return await cur.fetchone()
+            finally:
+                # The pool runs with autocommit off, so this SELECT opened a
+                # REPEATABLE READ snapshot. End it before the connection goes
+                # back to the pool, or later reads on it would see stale data.
+                await conn.rollback()

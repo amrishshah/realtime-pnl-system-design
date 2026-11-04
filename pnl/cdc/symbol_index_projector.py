@@ -7,6 +7,10 @@ arrive twice. The index is a Redis SET, so `SADD` makes redelivery a free
 no-op — no "have I seen this event" bookkeeping needed.
 
 Key: `symbol_index:{symbol}` -> SET of client_ids.
+
+It also feeds the Bloom filter (§3): every symbol a client holds must pass
+the "is this held by anyone?" gate, or its ticks would never fan out.
+Repeat adds are free for a standard (bit-array) Bloom filter.
 """
 from __future__ import annotations
 
@@ -38,3 +42,5 @@ class SymbolIndexProjector:
         client_id = after["client_id"]
         symbol = after["symbol"]
         await self.redis.sadd(index_key(symbol), client_id)
+        if self.bloom is not None:
+            await self.bloom.add(symbol)

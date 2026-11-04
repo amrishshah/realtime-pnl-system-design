@@ -1,49 +1,55 @@
 """
-STAGE 3 EXERCISE — implement BloomFilter.
+Bloom filters gating per-tick lookups (design doc §3, §11).
 
-Design doc §3: read-through lookups (Redis, then MySQL on miss) for every
-incoming tick's symbol -- even symbols nobody holds -- would hammer MySQL at
-tick-rate volume. Gate lookups behind a Bloom filter: "is this symbol held
-by anyone at all?" answered in O(1), with no false negatives (a Bloom filter
-may say "maybe held" for something nobody holds -- a false positive, costing
-one wasted lookup -- but it will never say "not held" for something that
-*is* held).
+"Is this symbol held by anyone at all?" answered in O(1), with no false
+negatives: a Bloom filter may say "maybe held" for a symbol nobody holds (a
+false positive, costing one wasted lookup) but never "not held" for one
+that is. Only symbols that pass proceed to the index lookup and Redis
+read-through, so ticks for unheld symbols never touch Redis/MySQL.
 
-Implementation notes:
-- Back the bit array with Redis SETBIT/GETBIT under one key (e.g.
-  "bloom:symbols") so the filter is shared across all app instances/workers.
-- Use `k` independent hash functions: `mmh3.hash(value, seed=i) % size_bits`
-  for i in range(k) is a standard, simple way to get k "independent enough"
-  hashes from one fast hash function with different seeds.
-- `add(symbol)`: SETBIT to 1 at each of the k computed positions.
-- `might_contain(symbol)`: GETBIT at each of the k positions; return True
-  only if ALL of them are 1. Pipeline the GETBITs into one round trip.
-
-Suggested sizing for the exercise: size_bits=1_000_000, num_hashes=7
-(~1% false-positive rate at a few thousand distinct symbols).
-
-(Stage 11 adds `CountingBloomFilter` below, which supports deletion —
-`BloomFilter` itself never needs to change.)
+The filter lives in Redis so every app instance and the CDC worker share it.
 """
 from __future__ import annotations
 
+import mmh3
 import redis.asyncio as redis
 
 
 class BloomFilter:
+    """Standard Bloom filter over a Redis bit array (SETBIT/GETBIT).
+
+    k bit positions per value come from `mmh3` seeded 0..k-1. Sizing: at
+    size_bits=1_000_000 and num_hashes=7, a few thousand distinct symbols
+    give a false-positive rate well under 1%.
+    """
+
     def __init__(
         self, redis_client: redis.Redis, key: str, size_bits: int, num_hashes: int
     ) -> None:
-        raise NotImplementedError("Stage 3: implement BloomFilter.__init__")
+        if size_bits <= 0 or num_hashes <= 0:
+            raise ValueError("size_bits and num_hashes must be positive")
+        self.redis = redis_client
+        self.key = key
+        self.size_bits = size_bits
+        self.num_hashes = num_hashes
 
     def _bit_positions(self, value: str) -> list[int]:
-        raise NotImplementedError("Stage 3: implement BloomFilter._bit_positions")
+        return [
+            mmh3.hash(value, seed=i, signed=False) % self.size_bits
+            for i in range(self.num_hashes)
+        ]
 
     async def add(self, value: str) -> None:
-        raise NotImplementedError("Stage 3: implement BloomFilter.add")
+        pipe = self.redis.pipeline(transaction=False)
+        for pos in self._bit_positions(value):
+            pipe.setbit(self.key, pos, 1)
+        await pipe.execute()
 
     async def might_contain(self, value: str) -> bool:
-        raise NotImplementedError("Stage 3: implement BloomFilter.might_contain")
+        pipe = self.redis.pipeline(transaction=False)
+        for pos in self._bit_positions(value):
+            pipe.getbit(self.key, pos)
+        return all(await pipe.execute())
 
 
 class CountingBloomFilter(BloomFilter):
@@ -71,9 +77,6 @@ class CountingBloomFilter(BloomFilter):
     `pnl/cdc/symbol_index_projector.py` docstring for how to guard this
     using Redis SADD's return value (it tells you whether the member was
     actually new).
-
-    Reuses `_bit_positions` from `BloomFilter` — same hashing, different
-    storage (a Redis HASH of per-slot counters instead of a bit array).
 
     This class inherits `_bit_positions` from `BloomFilter` for hashing, but
     MUST override `add` and `might_contain` below — the inherited
