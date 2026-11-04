@@ -12,6 +12,7 @@ from pnl.cache.redis_client import get_redis
 from pnl.config import settings
 from pnl.db.mysql import close_pool, get_pool
 from pnl.fanout.dispatcher import FanoutDispatcher
+from pnl.ticks.coalescer import SymbolCoalescer
 from pnl.trade_service.api import router as trade_router
 from pnl.ws.server import router as ws_router
 from pnl.ws.server import set_tick_handler
@@ -43,10 +44,15 @@ async def lifespan(app: FastAPI):
     dispatcher = FanoutDispatcher(
         redis_client, position_cache, bloom, log_push,
         max_concurrency=settings.fanout_max_concurrency,
+        client_timeout_seconds=settings.fanout_client_timeout_seconds,
     )
-    set_tick_handler(dispatcher.handle_tick)
+    coalescer = SymbolCoalescer(
+        dispatcher, max_drain_wait_seconds=settings.coalescer_max_drain_wait_seconds
+    )
+    set_tick_handler(coalescer.submit)
 
     yield
+    await coalescer.close()
     await close_pool()
 
 

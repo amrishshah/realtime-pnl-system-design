@@ -14,6 +14,13 @@ per symbol, drained by one long-lived consumer task per symbol — a new
 `submit()` overwrites the dict entry and wakes the consumer, which always
 re-reads whatever is *currently* there rather than a queued value.
 
+A subtlety: `FanoutDispatcher.handle_tick` returns as soon as it has
+spawned the per-client tasks. Coalescing ticks in front of it would shrink
+the *tick* count but not the *work* — every tick would still add a fresh
+round of waiting per-client tasks. So the consumer also waits (bounded) for
+the previous tick's fan-out to drain via `dispatcher.wait_idle(symbol)`, and
+each per-client task has a timeout so one hung client can't stall its symbol.
+
 ## What you're building
 - **`pnl/ticks/coalescer.py::SymbolCoalescer`** — implement `submit()` and
   `_consume()` per the docstring.
@@ -36,3 +43,6 @@ pytest tests/stage05
   than 100 processed values, with the very last one always reflecting the
   most recently submitted price. A second test confirms two symbols'
   consumer loops are independent — one being slow never starves the other.
+- `test_backlog_bounded.py` — with a real dispatcher and slow pushes, a
+  burst of 50 ticks never has more than one tick's worth of per-client
+  tasks in flight, and every client still converges on the latest price.

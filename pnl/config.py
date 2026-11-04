@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     clickhouse_port: int = 8123
 
     fanout_max_concurrency: int = 500
+    fanout_client_timeout_seconds: float = 5.0
+    coalescer_max_drain_wait_seconds: float = 1.0
     watermark_lateness_seconds: float = 2.0
 
 
