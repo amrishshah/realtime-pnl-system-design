@@ -48,6 +48,21 @@ PushCallback = Callable[[str, str, Decimal, Decimal, Decimal], Awaitable[None]]
 _SCAN_BATCH = 1000
 
 
+def _honor_pending_cancel() -> None:
+    """Re-raise a cancellation a library swallowed.
+
+    A cancel that lands while redis-py is mid-command can be absorbed
+    inside the client (seen in testing: tasks cancelled during HGETALL went
+    on to push). The task's `cancelling()` count still shows the request, so
+    honor it here; otherwise shutdown or a per-client timeout could be
+    silently ignored. Inside `asyncio.timeout`, a re-raised timeout cancel
+    still becomes TimeoutError.
+    """
+    task = asyncio.current_task()
+    if task is not None and task.cancelling():
+        raise asyncio.CancelledError
+
+
 class FanoutDispatcher:
     def __init__(
         self,
@@ -136,6 +151,7 @@ class FanoutDispatcher:
             async with self.semaphore:
                 async with asyncio.timeout(self.client_timeout_seconds):
                     position = await self.position_cache.get(client_id, tick.symbol)
+                    _honor_pending_cancel()
                     if position is not None:
                         pnl = compute_pnl(tick.price, position.avg_buy_price, position.quantity)
                         await self.push_callback(
