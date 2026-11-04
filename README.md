@@ -4,12 +4,20 @@ A staged, codecrafters-style build of a real-time PnL (profit & loss)
 calculation service: trade events + market data ticks → sub-second
 unrealized PnL updates per client, per position.
 
-This repo is **not** a finished implementation — it's a course. The
-infrastructure, wiring, and data shapes are provided; the core logic in
-each stage is a `NotImplementedError` stub you fill in, verified by a
-pytest suite that acts as the "tester." Stages build on each other in one
-evolving codebase, mirroring the trap → fix reasoning of the original
-design walkthrough.
+The repo is both a course and its reference implementation. Each stage has
+a write-up in `stages/` and a pytest suite in `tests/stageNN/` that acts as
+the "tester". The `main` code is fully implemented, and the git history has
+**one commit per stage**, so you can check out any stage to see exactly what
+it adds:
+
+```bash
+git log --oneline              # "Stage N: ..." commits, in order
+git show <stage-commit>        # just that stage's change
+```
+
+To work through it yourself, check out the scaffold commit ("Add staged,
+codecrafters-style course ...") where the core logic is still
+`NotImplementedError` stubs, and implement stage by stage against the tests.
 
 ## Prerequisites
 
@@ -69,3 +77,41 @@ scripts/        dev tools (tick generator, connector registration, EOD seed, cha
 stages/         course content, one file per stage
 tests/          the tester — one directory per stage
 ```
+
+## Running the tests
+
+The suites run against the real stack, so bring it up and register the
+Debezium connector first:
+
+```bash
+docker compose up -d --build
+./scripts/register_connectors.sh   # once kafka-connect is up (~20-30s)
+pytest tests
+```
+
+The `app` and `cdc-worker` containers are the two processes: the FastAPI
+service (trades, ticks, WebSocket, `/metrics`) and the CDC projectors. The
+EOD job runs on demand: `python -m pnl.eod.reconciliation --date YYYY-MM-DD`
+(exits non-zero on drift).
+
+## Production notes beyond the design doc
+
+Building this against real MySQL, Kafka/Debezium and Redis surfaced several
+issues the design doc doesn't cover; each is explained in its stage write-up
+and commit:
+
+- One Debezium connector for both tables: two connectors sharing a
+  `topic.prefix` collide on JMX metrics and the second one stalls (Stage 1).
+- Index membership follows the `positions` stream, so entries and exits stay
+  ordered; feeding them from two topics can drop a re-entering client
+  (Stage 11).
+- The coalescer waits for each tick's fan-out to drain; otherwise every tick
+  adds another round of per-client tasks (Stage 5).
+- First-trade gap-lock deadlocks under `SELECT ... FOR UPDATE` are retried
+  (Stage 8).
+- Counting-Bloom counters and index membership change in one atomic Lua
+  script; rebuilds count holders and swap in atomically (Stage 11).
+- ClickHouse writes are batched; money totals in Lua use exact fixed-point
+  arithmetic, not doubles (Stages 6, 10).
+- redis-py's default pool caps at 100 connections and fails fast; the app
+  uses a blocking pool and caps fan-out concurrency to it (Stage 4).

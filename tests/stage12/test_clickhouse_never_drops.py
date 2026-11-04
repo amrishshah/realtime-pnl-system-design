@@ -41,7 +41,7 @@ async def test_out_of_order_ticks_all_land_and_are_correctly_ordered():
         expected_order = [base + timedelta(seconds=s) for s in [1, 3, 5, 7, 8]]
         # ClickHouse DateTime64 has millisecond precision; compare with a
         # small tolerance rather than exact equality.
-        for actual, expected in zip(rows, expected_order):
+        for actual, expected in zip(rows, expected_order, strict=True):
             assert abs((actual.replace(tzinfo=timezone.utc) - expected).total_seconds()) < 0.01, (
                 f"expected {expected}, got {actual} — ticks must be queryable "
                 "in correct event-time order regardless of insertion order"

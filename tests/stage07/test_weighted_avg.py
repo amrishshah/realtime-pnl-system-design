@@ -12,7 +12,7 @@ import pytest
 import redis.asyncio as redis
 
 from pnl.common.events import Side, Trade
-from pnl.trade_service.position_writer import record_trade
+from pnl.trade_service.position_writer import InsufficientPositionError, record_trade
 
 BASE_URL = "http://localhost:8000"
 
@@ -117,7 +117,7 @@ async def test_overselling_is_rejected():
         client_id=client_id, symbol=symbol, side=Side.BUY,
         quantity=decimal.Decimal("5"), price=decimal.Decimal("200"), event_time=now,
     ))
-    with pytest.raises(Exception):
+    with pytest.raises(InsufficientPositionError):
         await record_trade(Trade(
             client_id=client_id, symbol=symbol, side=Side.SELL,
             quantity=decimal.Decimal("10"), price=decimal.Decimal("210"), event_time=now,

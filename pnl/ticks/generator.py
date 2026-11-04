@@ -10,7 +10,6 @@ import argparse
 import asyncio
 import random
 from datetime import datetime, timezone
-from decimal import Decimal
 
 import httpx
 
