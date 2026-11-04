@@ -18,6 +18,16 @@ The second transaction blocks until the first commits, then reads the
 *updated* row instead of a stale one. Mutual exclusion handled at the
 source of truth, no app-level coordination needed.
 
+## The subtlety the design doc doesn't mention
+A client's *first* trade on a symbol has no row to lock. Under MySQL's
+default REPEATABLE READ, `FOR UPDATE` on a missing row takes a **gap lock**;
+two concurrent first trades both get it, both `INSERT`, and InnoDB
+deadlocks one of them (error 1213). The standard answer is to roll back and
+retry the whole transaction (also for lock-wait timeouts, 1205, and the
+duplicate-key form of the same race under READ COMMITTED, 1062), bounded and
+with jittered backoff. The Stage 8 test hits exactly this: 20 concurrent
+first trades on a brand-new position.
+
 ## What you're building
 Go back to **`pnl/trade_service/position_writer.py::record_trade`** one
 more time (see the updated docstring) and wrap the read-modify-write in a
