@@ -23,7 +23,11 @@ prove the property, by extending the `FanoutDispatcher` you already built:
 - **`pnl/fanout/dispatcher.py`** — add `tasks_started` / `tasks_completed`
   / `tasks_failed` counters and an `_in_flight_tasks` set (see the Stage 9
   docstring addition).
-- **`GET /metrics`** (provided in `pnl/main.py`) exposes those counters.
+  A cancelled task is counted as failed and its `CancelledError` is
+  re-raised — swallowing it would break asyncio's cancellation contract
+  (shutdown, timeouts), and nothing needs to "recover" it anyway.
+- **`GET /metrics`** (provided in `pnl/main.py`) exposes those counters
+  plus `tasks_in_flight`.
 - `scripts/chaos_kill_fanout.py` (provided, manual/optional) — watches
   `/metrics` while you `docker kill -s SIGKILL pnl-app` mid-burst and
   restart it, to see the property hold against the real running service.

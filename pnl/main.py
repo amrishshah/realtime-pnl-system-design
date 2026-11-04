@@ -40,6 +40,8 @@ async def log_push(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _dispatcher
+
     redis_client = get_redis()
     pool = await get_pool()
     ch_client = await clickhouse_connect.get_async_client(
@@ -53,6 +55,7 @@ async def lifespan(app: FastAPI):
         max_concurrency=settings.fanout_max_concurrency,
         client_timeout_seconds=settings.fanout_client_timeout_seconds,
     )
+    _dispatcher = dispatcher
     coalescer = SymbolCoalescer(
         dispatcher, max_drain_wait_seconds=settings.coalescer_max_drain_wait_seconds
     )
@@ -91,4 +94,5 @@ async def metrics() -> dict[str, int]:
         "tasks_started": _dispatcher.tasks_started,
         "tasks_completed": _dispatcher.tasks_completed,
         "tasks_failed": _dispatcher.tasks_failed,
+        "tasks_in_flight": _dispatcher.tasks_in_flight,
     }

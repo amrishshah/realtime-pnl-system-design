@@ -18,6 +18,11 @@ to drain before starting the next one, so ticks arriving faster than
 clients drain can't pile up an unbounded backlog of waiting tasks. Each
 per-client task also has a timeout, so one hung client can't hold its slot
 (or its symbol) forever.
+
+Crash mid-fan-out (§9) needs no recovery code: PnL is recomputed from
+scratch on every tick, so a client whose task failed or was cancelled is
+simply correct again on the next tick. The counters below make that
+observable (`GET /metrics`); they don't drive any retry.
 """
 from __future__ import annotations
 
@@ -65,6 +70,13 @@ class FanoutDispatcher:
         # Hold every in-flight task here until it finishes.
         self._in_flight_tasks: set[asyncio.Task] = set()
         self._in_flight_by_symbol: dict[str, set[asyncio.Task]] = {}
+        self.tasks_started = 0
+        self.tasks_completed = 0
+        self.tasks_failed = 0
+
+    @property
+    def tasks_in_flight(self) -> int:
+        return len(self._in_flight_tasks)
 
     @staticmethod
     def _cap_to_redis_pool(redis_client: redis.Redis, max_concurrency: int) -> int:
@@ -92,6 +104,7 @@ class FanoutDispatcher:
         # that blocks Redis while it runs.
         async for client_id in self.redis.sscan_iter(index_key(tick.symbol), count=_SCAN_BATCH):
             task = asyncio.create_task(self._process_client(tick, client_id))
+            self.tasks_started += 1
             self._track(tick.symbol, task)
 
     async def wait_idle(self, symbol: str, timeout: float | None) -> bool:
@@ -119,17 +132,24 @@ class FanoutDispatcher:
         task.add_done_callback(_untrack)
 
     async def _process_client(self, tick: Tick, client_id: str) -> None:
-        async with self.semaphore:
-            try:
+        try:
+            async with self.semaphore:
                 async with asyncio.timeout(self.client_timeout_seconds):
                     position = await self.position_cache.get(client_id, tick.symbol)
-                    if position is None:
-                        return
-                    pnl = compute_pnl(tick.price, position.avg_buy_price, position.quantity)
-                    await self.push_callback(
-                        client_id, tick.symbol, pnl, tick.price, position.quantity
-                    )
-            except Exception:
-                # Fire-and-forget: nobody awaits this task, so log here or the
-                # error vanishes. No retry needed — the next tick recomputes.
-                logger.exception("fan-out failed for client=%s symbol=%s", client_id, tick.symbol)
+                    if position is not None:
+                        pnl = compute_pnl(tick.price, position.avg_buy_price, position.quantity)
+                        await self.push_callback(
+                            client_id, tick.symbol, pnl, tick.price, position.quantity
+                        )
+        except asyncio.CancelledError:
+            # A crash/cancel mid-fan-out. Count it and let cancellation
+            # propagate; the next tick recomputes this client from scratch.
+            self.tasks_failed += 1
+            raise
+        except Exception:
+            # Fire-and-forget: nobody awaits this task, so log here or the
+            # error vanishes. No retry needed — the next tick recomputes.
+            self.tasks_failed += 1
+            logger.exception("fan-out failed for client=%s symbol=%s", client_id, tick.symbol)
+        else:
+            self.tasks_completed += 1
