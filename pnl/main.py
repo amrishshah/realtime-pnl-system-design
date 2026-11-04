@@ -2,21 +2,50 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from decimal import Decimal
 
 from fastapi import FastAPI, HTTPException
 
+from pnl.cache.bloom import BloomFilter
+from pnl.cache.position_cache import PositionCache
+from pnl.cache.redis_client import get_redis
+from pnl.config import settings
 from pnl.db.mysql import close_pool, get_pool
+from pnl.fanout.dispatcher import FanoutDispatcher
 from pnl.trade_service.api import router as trade_router
 from pnl.ws.server import router as ws_router
+from pnl.ws.server import set_tick_handler
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("pnl")
+
+BLOOM_KEY = "bloom:symbols"
+BLOOM_SIZE_BITS = 1_000_000
+BLOOM_NUM_HASHES = 7
 
 _dispatcher = None
 
 
+async def log_push(
+    client_id: str, symbol: str, pnl: Decimal, price: Decimal, quantity: Decimal
+) -> None:
+    """Placeholder push — replaced by the reconnect cache + WebSocket push in Stage 10."""
+    logger.info("pnl client=%s symbol=%s pnl=%s price=%s qty=%s", client_id, symbol, pnl, price, quantity)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await get_pool()
+    redis_client = get_redis()
+    pool = await get_pool()
+
+    bloom = BloomFilter(redis_client, BLOOM_KEY, BLOOM_SIZE_BITS, BLOOM_NUM_HASHES)
+    position_cache = PositionCache(redis_client, pool)
+    dispatcher = FanoutDispatcher(
+        redis_client, position_cache, bloom, log_push,
+        max_concurrency=settings.fanout_max_concurrency,
+    )
+    set_tick_handler(dispatcher.handle_tick)
+
     yield
     await close_pool()
 

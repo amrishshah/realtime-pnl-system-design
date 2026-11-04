@@ -12,6 +12,8 @@ class Settings(BaseSettings):
 
     redis_host: str = "localhost"
     redis_port: int = 6379
+    redis_max_connections: int = 1000
+    redis_pool_timeout_seconds: float = 5.0
 
     kafka_bootstrap_servers: str = "localhost:9092"
 
