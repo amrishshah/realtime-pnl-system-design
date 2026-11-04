@@ -1,30 +1,55 @@
 """
-STAGE 13 EXERCISE — implement AuditWriter.
+Durable audit trail of live PnL (design doc §13).
 
-Design doc §13: the live tick-driven path is fast but structurally
-unverified — nothing checks it against ground truth. Reconciling by
-re-walking the same derived chain (MySQL -> CDC -> Redis -> coalesce)
-would just reproduce any bug already in that chain, so it doesn't count as
-verification. An independent EOD job needs something to diff its own
-independently-computed PnL against — but `pnl/history/clickhouse_sink.py`
-only holds raw *prices*, not computed *PnL*. This writer is what makes a
-durable audit trail exist at all: every fan-out task, at the moment it
-computes and pushes PnL, also records that value here.
+The live path is fast but unverified. EOD reconciliation independently
+recomputes PnL from MySQL positions and official closing prices — but it
+needs something to diff against, and the raw `ticks` table holds prices,
+not computed PnL. So every fan-out push also records the value it pushed
+here, in `pnl_audit`.
 
-What to implement:
-- `__init__(client)`: store a `clickhouse_connect` async client.
-- `write(client_id, symbol, pnl, price)`: insert one row into `pnl_audit`
-  (`client_id`, `symbol`, `pnl`, `price` — `computed_at` defaults to now in
-  the table schema, but passing it explicitly is fine too if you prefer).
+This is the highest-volume write in the system (one row per client per
+tick), so rows go through the same batched inserter as raw ticks rather
+than one ClickHouse INSERT each.
 """
 from __future__ import annotations
 
-from decimal import Decimal
+from datetime import datetime, timezone
+from decimal import ROUND_HALF_EVEN, Decimal
+
+from pnl.history.batching import BatchedInserter
+
+# pnl_audit.pnl / price are Decimal64(4).
+_SCALE = Decimal("0.0001")
 
 
 class AuditWriter:
-    def __init__(self, client) -> None:
-        raise NotImplementedError("Stage 13: implement AuditWriter.__init__")
+    def __init__(
+        self,
+        client,
+        batch_size: int = 5000,
+        flush_interval_seconds: float = 0.5,
+        max_buffered_rows: int = 500_000,
+    ) -> None:
+        self._inserter = BatchedInserter(
+            client,
+            table="pnl_audit",
+            column_names=["client_id", "symbol", "pnl", "price", "computed_at"],
+            batch_size=batch_size,
+            flush_interval_seconds=flush_interval_seconds,
+            max_buffered_rows=max_buffered_rows,
+        )
 
     async def write(self, client_id: str, symbol: str, pnl: Decimal, price: Decimal) -> None:
-        raise NotImplementedError("Stage 13: implement AuditWriter.write")
+        await self._inserter.add([
+            client_id,
+            symbol,
+            pnl.quantize(_SCALE, rounding=ROUND_HALF_EVEN),
+            price.quantize(_SCALE, rounding=ROUND_HALF_EVEN),
+            datetime.now(timezone.utc),
+        ])
+
+    async def flush(self) -> None:
+        await self._inserter.flush()
+
+    async def close(self) -> None:
+        await self._inserter.close()

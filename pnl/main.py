@@ -8,6 +8,7 @@ from decimal import Decimal
 import clickhouse_connect
 from fastapi import FastAPI, HTTPException
 
+from pnl.audit.audit_writer import AuditWriter
 from pnl.cache.bloom import symbols_bloom
 from pnl.cache.position_cache import PositionCache
 from pnl.cache.reconnect_cache import ReconnectCache
@@ -45,14 +46,17 @@ async def lifespan(app: FastAPI):
     position_cache = PositionCache(redis_client, pool)
     reconnect_cache = ReconnectCache(redis_client)
     connection_manager = ConnectionManager()
+    audit_writer = AuditWriter(ch_client)
     init_reconnect(reconnect_cache, connection_manager)
 
     async def push(
         client_id: str, symbol: str, pnl: Decimal, price: Decimal, quantity: Decimal
     ) -> None:
-        # Persist first (§10: a reconnect is a cheap read), then fan out to
-        # whatever WebSocket connections this client has open right now.
+        # Persist first (§10: a reconnect is a cheap read), record what was
+        # pushed for EOD reconciliation (§13), then fan out to whatever
+        # WebSocket connections this client has open right now.
         await reconnect_cache.record(client_id, symbol, pnl, price, quantity)
+        await audit_writer.write(client_id, symbol, pnl, price)
         await connection_manager.send(
             client_id,
             {"type": "pnl", "symbol": symbol, "pnl": str(pnl),
@@ -83,6 +87,7 @@ async def lifespan(app: FastAPI):
     yield
     await coalescer.close()
     await raw_sink.close()
+    await audit_writer.close()
     await ch_client.close()
     await close_pool()
 

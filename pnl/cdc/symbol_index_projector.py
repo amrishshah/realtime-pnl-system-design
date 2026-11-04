@@ -27,6 +27,7 @@ import logging
 from decimal import Decimal
 
 import redis.asyncio as redis
+from asyncmy.cursors import SSCursor
 
 from pnl.cache.bloom import BloomFilter
 
@@ -88,3 +89,60 @@ class SymbolIndexProjector:
         if self.bloom is None:
             return bool(await self.redis.srem(index_key(symbol), client_id))
         return await self.bloom.leave(index_key(symbol), client_id, symbol)
+
+
+async def rebuild_index_and_bloom(redis_client: redis.Redis, mysql_pool, bloom) -> dict[str, int]:
+    """Rebuild every `symbol_index:*` SET and the Bloom filter from MySQL
+    positions, the source of truth (EOD safety net, §11/§13).
+
+    Both are rebuilt from the same read, so the counting filter's invariant
+    (counters == index membership) holds afterwards. Each symbol's SET is
+    built in a temp key and swapped in with RENAME; index keys for symbols
+    nobody holds anymore are deleted. Run with CDC projection paused (EOD,
+    trading closed): a membership change applied mid-rebuild can be lost.
+
+    Returns {symbol: holder count}.
+    """
+    counts: dict[str, int] = {}
+    staged: dict[str, str] = {}
+
+    async def stage(symbol: str, members: list[str]) -> None:
+        # Outside the symbol_index:* namespace, so a crashed rebuild can't
+        # leave keys that look like real symbols.
+        temp = f"rebuild:{index_key(symbol)}"
+        await redis_client.delete(temp)
+        for i in range(0, len(members), 1000):
+            await redis_client.sadd(temp, *members[i : i + 1000])
+        staged[symbol] = temp
+        counts[symbol] = len(members)
+
+    async with mysql_pool.acquire() as conn:
+        try:
+            async with conn.cursor(SSCursor) as cur:
+                # Ordered by symbol so one symbol's holders are contiguous:
+                # memory stays bounded by the largest single symbol.
+                await cur.execute(
+                    "SELECT symbol, client_id FROM positions WHERE quantity > 0 ORDER BY symbol"
+                )
+                current, members = None, []
+                while rows := await cur.fetchmany(10_000):
+                    for symbol, client_id in rows:
+                        if symbol != current:
+                            if current is not None:
+                                await stage(current, members)
+                            current, members = symbol, []
+                        members.append(client_id)
+                if current is not None:
+                    await stage(current, members)
+        finally:
+            await conn.rollback()
+
+    for symbol, temp in staged.items():
+        await redis_client.rename(temp, index_key(symbol))
+    async for key in redis_client.scan_iter(match=f"{INDEX_KEY_PREFIX}*", count=1000):
+        symbol = key[len(INDEX_KEY_PREFIX):]
+        if symbol not in staged:
+            await redis_client.delete(key)
+
+    await bloom.rebuild(counts)
+    return counts

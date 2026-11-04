@@ -3,7 +3,7 @@ and deliberately-drifted audit rows; runs the EOD reconciler; and checks it
 flags exactly the drifted client/symbol pairs and rebuilds the Bloom filter
 to match exactly the symbols with a nonzero held quantity."""
 import uuid
-from datetime import date
+from datetime import datetime, timezone
 from decimal import Decimal
 
 import asyncmy
@@ -17,7 +17,9 @@ from pnl.eod.reconciliation import EODReconciler
 
 @pytest.mark.asyncio
 async def test_reconciliation_flags_only_drifted_pairs_and_rebuilds_bloom():
-    close_date = date(2024, 1, 15)
+    # Today's close: the reconciler compares against audit values recorded
+    # up to the end of the close date, and the rows below are stamped now.
+    close_date = datetime.now(timezone.utc).date()
     r = redis.Redis(host="localhost", port=6379, decode_responses=True)
     bloom_key = f"cbloom:eod-test:{uuid.uuid4().hex[:8]}"
     await r.delete(bloom_key)
@@ -76,7 +78,9 @@ async def test_reconciliation_flags_only_drifted_pairs_and_rebuilds_bloom():
         reconciler = EODReconciler(pool, ch_client, bloom)
         drifts = await reconciler.run(close_date, tolerance=Decimal("0.01"))
 
-        drifted_symbols_found = {d["symbol"] for d in drifts}
+        # Only this test's client: the shared DB may hold other positions,
+        # which a real EOD run would (rightly) check too.
+        drifted_symbols_found = {d["symbol"] for d in drifts if d["client_id"] == client_id}
         assert drifted_symbols_found == {drifted_symbol, missing_audit_symbol}, (
             f"expected exactly {{'{drifted_symbol}', '{missing_audit_symbol}'}} "
             f"to be flagged, got {drifted_symbols_found}"
@@ -88,6 +92,14 @@ async def test_reconciliation_flags_only_drifted_pairs_and_rebuilds_bloom():
             "rebuild must exclude symbols with a fully-closed (zero) position"
         )
     finally:
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("DELETE FROM positions WHERE client_id = %s", (client_id,))
+                await cur.execute(
+                    "DELETE FROM eod_closing_prices WHERE symbol IN (%s, %s, %s)",
+                    (correct_symbol, drifted_symbol, missing_audit_symbol),
+                )
+            await conn.commit()
         pool.close()
         await pool.wait_closed()
         await ch_client.command(

@@ -43,7 +43,9 @@ value to `pnl_audit`.
 ## What you're building
 - **`pnl/audit/audit_writer.py::AuditWriter`** — implement `write()`.
   Wired into `pnl/main.py`'s push path (provided) so every live PnL push
-  also lands in `pnl_audit`.
+  also lands in `pnl_audit`. It's one row per client per tick — the
+  highest-volume write in the system — so it reuses Stage 6's batched
+  inserter.
 - `docker/clickhouse/init/tables.sql` (provided) adds the `pnl_audit`
   table; `docker/mysql/init/01_schema.sql` (provided) adds
   `eod_closing_prices`; `scripts/seed_eod_prices.py` (provided) simulates
@@ -51,6 +53,14 @@ value to `pnl_audit`.
 - **`pnl/eod/reconciliation.py::EODReconciler`** — implement `run()` per
   the docstring: compute official PnL, diff against the latest audit row,
   flag drift beyond tolerance, rebuild the Bloom filter.
+  - Fetch "latest audit per (client, symbol)" in one aggregate query
+    (`argMax(pnl, computed_at) ... GROUP BY`), bounded to the end of the
+    close date with a lookback window — not one query per position.
+  - Rebuild the symbol index *and* the Bloom filter from the same MySQL
+    read (`rebuild_index_and_bloom`): Stage 11's counters must equal index
+    membership, so rebuilding only the filter could desync them.
+  - The CLI exits non-zero when drift is found, so a scheduler can alert.
+  - Run it after the close with trading halted and CDC paused.
 
 ## Run it
 ```bash

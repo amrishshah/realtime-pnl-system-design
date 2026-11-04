@@ -18,6 +18,7 @@ async def test_write_persists_a_queryable_row():
 
     try:
         await writer.write(client_id, symbol, Decimal("123.45"), Decimal("99.99"))
+        await writer.flush()  # the writer batches inserts
 
         result = await client.query(
             "SELECT pnl, price FROM pnl_audit WHERE client_id = {cid:String} "
@@ -29,5 +30,6 @@ async def test_write_persists_a_queryable_row():
         assert Decimal(str(pnl)) == Decimal("123.45")
         assert Decimal(str(price)) == Decimal("99.99")
     finally:
+        await writer.close()
         await client.command(f"ALTER TABLE pnl_audit DELETE WHERE client_id = '{client_id}'")
         await client.close()

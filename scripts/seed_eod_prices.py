@@ -22,8 +22,8 @@ async def seed(close_date: str, prices: dict[str, str]) -> None:
             for symbol, price in prices.items():
                 await cur.execute(
                     "INSERT INTO eod_closing_prices (symbol, close_date, close_price) "
-                    "VALUES (%s, %s, %s) "
-                    "ON DUPLICATE KEY UPDATE close_price = VALUES(close_price)",
+                    "VALUES (%s, %s, %s) AS new "
+                    "ON DUPLICATE KEY UPDATE close_price = new.close_price",
                     (symbol, close_date, price),
                 )
         await conn.commit()
