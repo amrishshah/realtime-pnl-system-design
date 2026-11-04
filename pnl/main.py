@@ -1,17 +1,21 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from decimal import Decimal
 
+import clickhouse_connect
 from fastapi import FastAPI, HTTPException
 
 from pnl.cache.bloom import BloomFilter
 from pnl.cache.position_cache import PositionCache
 from pnl.cache.redis_client import get_redis
+from pnl.common.events import Tick
 from pnl.config import settings
 from pnl.db.mysql import close_pool, get_pool
 from pnl.fanout.dispatcher import FanoutDispatcher
+from pnl.history.clickhouse_sink import RawTickSink
 from pnl.ticks.coalescer import SymbolCoalescer
 from pnl.trade_service.api import router as trade_router
 from pnl.ws.server import router as ws_router
@@ -38,6 +42,9 @@ async def log_push(
 async def lifespan(app: FastAPI):
     redis_client = get_redis()
     pool = await get_pool()
+    ch_client = await clickhouse_connect.get_async_client(
+        host=settings.clickhouse_host, port=settings.clickhouse_port
+    )
 
     bloom = BloomFilter(redis_client, BLOOM_KEY, BLOOM_SIZE_BITS, BLOOM_NUM_HASHES)
     position_cache = PositionCache(redis_client, pool)
@@ -49,10 +56,19 @@ async def lifespan(app: FastAPI):
     coalescer = SymbolCoalescer(
         dispatcher, max_drain_wait_seconds=settings.coalescer_max_drain_wait_seconds
     )
-    set_tick_handler(coalescer.submit)
+    raw_sink = RawTickSink(ch_client)
+
+    async def ingest(tick: Tick) -> None:
+        # Branch before coalescing (§6): every tick reaches ClickHouse,
+        # in parallel with the coalesced live-dashboard path.
+        await asyncio.gather(raw_sink.write(tick), coalescer.submit(tick))
+
+    set_tick_handler(ingest)
 
     yield
     await coalescer.close()
+    await raw_sink.close()
+    await ch_client.close()
     await close_pool()
 
 

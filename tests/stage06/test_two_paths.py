@@ -47,6 +47,8 @@ async def test_clickhouse_retains_everything_while_coalesced_path_drops_most():
             )
 
         await asyncio.sleep(1.5)
+        # The sink batches inserts; make sure everything buffered is written.
+        await sink.flush()
 
         result = await client.query(
             "SELECT count() FROM ticks WHERE symbol = {symbol:String}",
@@ -64,5 +66,6 @@ async def test_clickhouse_retains_everything_while_coalesced_path_drops_most():
             "isn't happening (check Stage 5)"
         )
     finally:
+        await sink.close()
         await client.command(f"ALTER TABLE ticks DELETE WHERE symbol = '{symbol}'")
         await client.close()

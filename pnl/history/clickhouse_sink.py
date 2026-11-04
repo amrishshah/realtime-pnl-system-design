@@ -1,33 +1,44 @@
 """
-STAGE 6 EXERCISE — implement RawTickSink.
+Raw-tick history sink (design doc §6, §12).
 
-Design doc §6: coalescing (Stage 5) is correct for the live dashboard
-number — it only ever needs the latest price. But a PnL chart/history view
-needs every meaningful price movement, or the line looks wrong/jumpy.
-Applying coalescing to both consumers would silently drop data the chart
-needs.
+Coalescing is right for the live number but wrong for a PnL chart, which
+needs every price movement. So ingestion branches *before* coalescing: every
+tick is written here, unconditionally, in parallel with the coalesced live
+path (the branch itself is wired in `pnl/main.py`).
 
-The fix is to branch the pipeline at ingestion, *before* coalescing: raw
-ticks get written to ClickHouse in parallel with (not instead of) the
-coalesced path — append-only, high-volume, exactly the shape ClickHouse is
-built for. (`pnl/main.py` wires this branch via `asyncio.gather` — that
-part is provided; this file is the ClickHouse-writing half of it.)
-
-What to implement:
-- `__init__(client)`: store a `clickhouse_connect` async client (constructed
-  via `clickhouse_connect.get_async_client(...)` in `pnl/main.py`).
-- `write(tick)`: insert one row into `ticks` — `await self.client.insert(
-  "ticks", [[tick.symbol, tick.price, tick.event_time]],
-  column_names=["symbol", "price", "event_time"])`.
+This path never drops a tick for lateness or reordering (§12): the `ticks`
+table is `ORDER BY (symbol, event_time)`, so a late tick still lands in the
+right place on the timeline.
 """
 from __future__ import annotations
 
 from pnl.common.events import Tick
+from pnl.history.batching import BatchedInserter
 
 
 class RawTickSink:
-    def __init__(self, client) -> None:
-        raise NotImplementedError("Stage 6: implement RawTickSink.__init__")
+    def __init__(
+        self,
+        client,
+        batch_size: int = 1000,
+        flush_interval_seconds: float = 0.25,
+        max_buffered_rows: int = 100_000,
+    ) -> None:
+        self._inserter = BatchedInserter(
+            client,
+            table="ticks",
+            column_names=["symbol", "price", "event_time"],
+            batch_size=batch_size,
+            flush_interval_seconds=flush_interval_seconds,
+            max_buffered_rows=max_buffered_rows,
+        )
 
     async def write(self, tick: Tick) -> None:
-        raise NotImplementedError("Stage 6: implement RawTickSink.write")
+        await self._inserter.add([tick.symbol, tick.price, tick.event_time])
+
+    async def flush(self) -> None:
+        """Force buffered ticks into ClickHouse now."""
+        await self._inserter.flush()
+
+    async def close(self) -> None:
+        await self._inserter.close()

@@ -23,6 +23,11 @@ not by picking one strategy for everything.
   (provided) creates the `ticks` MergeTree table, ordered by
   `(symbol, event_time)`.
 - **`pnl/history/clickhouse_sink.py::RawTickSink`** — implement `write()`.
+  Don't insert one row per tick: every ClickHouse INSERT creates a data
+  part, and at tick rate the server can't merge them fast enough ("too many
+  parts"). `pnl/history/batching.py::BatchedInserter` buffers rows and
+  inserts in batches, drops rows only after an insert succeeds, and applies
+  backpressure once its buffer is full instead of growing without bound.
 - `pnl/main.py` (provided) now branches ingestion with `asyncio.gather(
   raw_sink.write(tick), coalescer.submit(tick))` — both paths run
   unconditionally and independently for every tick.
@@ -41,3 +46,5 @@ pytest tests/stage06
   contain all 200 rows, while the (deliberately slow, fake) coalesced
   dispatcher processes far fewer — proving the branch happens before
   coalescing, not after.
+- `test_batching.py` — rows are inserted in batches, a failed insert keeps
+  its rows for retry, and a full buffer pushes back on the caller.

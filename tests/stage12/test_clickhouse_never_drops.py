@@ -29,6 +29,8 @@ async def test_out_of_order_ticks_all_land_and_are_correctly_ordered():
                 )
             )
 
+        await sink.flush()  # the sink batches inserts
+
         result = await client.query(
             "SELECT event_time FROM ticks WHERE symbol = {symbol:String} ORDER BY event_time",
             parameters={"symbol": symbol},
@@ -45,5 +47,6 @@ async def test_out_of_order_ticks_all_land_and_are_correctly_ordered():
                 "in correct event-time order regardless of insertion order"
             )
     finally:
+        await sink.close()
         await client.command(f"ALTER TABLE ticks DELETE WHERE symbol = '{symbol}'")
         await client.close()
