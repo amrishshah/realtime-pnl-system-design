@@ -10,6 +10,7 @@ from fastapi import FastAPI, HTTPException
 
 from pnl.cache.bloom import BloomFilter
 from pnl.cache.position_cache import PositionCache
+from pnl.cache.reconnect_cache import ReconnectCache
 from pnl.cache.redis_client import get_redis
 from pnl.common.events import Tick
 from pnl.config import settings
@@ -18,6 +19,8 @@ from pnl.fanout.dispatcher import FanoutDispatcher
 from pnl.history.clickhouse_sink import RawTickSink
 from pnl.ticks.coalescer import SymbolCoalescer
 from pnl.trade_service.api import router as trade_router
+from pnl.ws.connection_manager import ConnectionManager
+from pnl.ws.server import init_reconnect
 from pnl.ws.server import router as ws_router
 from pnl.ws.server import set_tick_handler
 
@@ -29,13 +32,6 @@ BLOOM_SIZE_BITS = 1_000_000
 BLOOM_NUM_HASHES = 7
 
 _dispatcher = None
-
-
-async def log_push(
-    client_id: str, symbol: str, pnl: Decimal, price: Decimal, quantity: Decimal
-) -> None:
-    """Placeholder push — replaced by the reconnect cache + WebSocket push in Stage 10."""
-    logger.info("pnl client=%s symbol=%s pnl=%s price=%s qty=%s", client_id, symbol, pnl, price, quantity)
 
 
 @asynccontextmanager
@@ -50,8 +46,24 @@ async def lifespan(app: FastAPI):
 
     bloom = BloomFilter(redis_client, BLOOM_KEY, BLOOM_SIZE_BITS, BLOOM_NUM_HASHES)
     position_cache = PositionCache(redis_client, pool)
+    reconnect_cache = ReconnectCache(redis_client)
+    connection_manager = ConnectionManager()
+    init_reconnect(reconnect_cache, connection_manager)
+
+    async def push(
+        client_id: str, symbol: str, pnl: Decimal, price: Decimal, quantity: Decimal
+    ) -> None:
+        # Persist first (§10: a reconnect is a cheap read), then fan out to
+        # whatever WebSocket connections this client has open right now.
+        await reconnect_cache.record(client_id, symbol, pnl, price, quantity)
+        await connection_manager.send(
+            client_id,
+            {"type": "pnl", "symbol": symbol, "pnl": str(pnl),
+             "price": str(price), "qty": str(quantity)},
+        )
+
     dispatcher = FanoutDispatcher(
-        redis_client, position_cache, bloom, log_push,
+        redis_client, position_cache, bloom, push,
         max_concurrency=settings.fanout_max_concurrency,
         client_timeout_seconds=settings.fanout_client_timeout_seconds,
     )

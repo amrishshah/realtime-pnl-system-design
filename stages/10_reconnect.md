@@ -27,7 +27,11 @@ Persist last-known PnL so a reconnect is a cheap read.
 
 ## What you're building
 - **`pnl/cache/lua/total_pnl.lua`** — implement the atomic read-sum-write
-  (see the script's comments).
+  (see the script's comments). Two details matter for money: Redis Lua
+  numbers are doubles, so summing `"0.1"` and `"0.2"` as floats stores
+  `0.30000000000000004` — parse each value into exact fixed-point units
+  instead. And the script can write the symbol's field *and* recompute the
+  total in one atomic round trip, rather than HSET followed by EVAL.
 - **`pnl/cache/reconnect_cache.py::ReconnectCache`** — implement
   `record()` (HSET the per-symbol JSON blob, invoke the Lua script for
   `total`) and `snapshot()` (HGETALL).
@@ -53,5 +57,7 @@ pytest tests/stage10
 - `test_reconnect_cache.py` — `record()` writes the correct per-symbol JSON;
   after many concurrent updates across 20 symbols for one client, `total`
   matches the true sum of every per-symbol pnl value.
+- `test_lua_exact_money.py` — no float drift, negative values and rounding,
+  twelve-digit values stay exact, and dropping a symbol recomputes `total`.
 - `test_websocket_reconnect.py` — connecting to `/ws/{client_id}` yields an
   immediate snapshot of pre-seeded Redis state, with no wait for a tick.
