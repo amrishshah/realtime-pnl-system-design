@@ -22,8 +22,9 @@ in Stage 4, since that's where per-tick lookups happen; this stage builds
 the two pieces the gate protects.)
 
 ## What you're building
-1. **Second Debezium connector** (already provided:
-   `docker/debezium/connector-positions.json`) capturing `pnl.positions`.
+1. **`pnl.positions` change stream** — the single Debezium connector from
+   Stage 1 (`docker/debezium/connector-pnl.json`) already captures it onto
+   the `pnl.pnl.positions` topic.
 2. **`pnl/cdc/position_cache_projector.py::PositionCacheProjector`** —
    implement `handle()`: a pure, math-free mirror from the `positions`
    binlog into Redis (`HSET position:{client_id}:{symbol}`).

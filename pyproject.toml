@@ -7,6 +7,7 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "asyncmy>=0.2.9",
+    "cryptography>=42",  # MySQL 8 caching_sha2_password auth
     "redis>=5.0",
     "aiokafka>=0.11",
     "clickhouse-connect>=0.7",
@@ -32,4 +33,5 @@ include = ["pnl*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]

@@ -26,8 +26,9 @@ else is a reliable, replayable derivation of *that one write*, via CDC
    envelope, call a handler, and commit the offset **only after the handler
    succeeds**. This is the mechanism that makes CDC reliable without a
    second write path.
-4. **Debezium wiring** (already provided): `docker/debezium/connector-trades.json`
-   configures a Debezium MySQL connector to capture `pnl.trades`;
+4. **Debezium wiring** (already provided): `docker/debezium/connector-pnl.json`
+   configures one Debezium MySQL connector capturing `pnl.trades` (and
+   `pnl.positions`, used from Stage 3);
    `scripts/register_connectors.sh` registers it against Kafka Connect's
    REST API.
 

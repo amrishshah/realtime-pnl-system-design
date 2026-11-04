@@ -4,6 +4,7 @@ it, with no second application-level write racing it."""
 import asyncio
 import datetime
 import json
+import uuid
 
 import httpx
 import pytest
@@ -16,23 +17,23 @@ TRADES_TOPIC = "pnl.pnl.trades"
 
 @pytest.mark.asyncio
 async def test_trade_write_appears_on_binlog_topic():
-    client_id = "client-cdc-test"
+    # Unique per run, so reading the topic from the beginning still finds
+    # exactly this test's event.
+    client_id = f"client-cdc-{uuid.uuid4().hex[:8]}"
     symbol = "MSFT"
 
     consumer = AIOKafkaConsumer(
         TRADES_TOPIC,
         bootstrap_servers=KAFKA_BOOTSTRAP,
-        auto_offset_reset="latest",
+        # "earliest", not "latest": on a fresh stack the topic doesn't exist
+        # until Debezium writes its first trade event, and a "latest"
+        # consumer can join after that event and miss it.
+        auto_offset_reset="earliest",
         enable_auto_commit=True,
         group_id=None,
     )
     await consumer.start()
     try:
-        # Give the consumer a moment to join before producing the event we're
-        # waiting for (auto_offset_reset=latest means anything before this
-        # point is invisible).
-        await asyncio.sleep(2)
-
         async with httpx.AsyncClient(base_url=BASE_URL, timeout=10) as client:
             resp = await client.post(
                 "/trades",

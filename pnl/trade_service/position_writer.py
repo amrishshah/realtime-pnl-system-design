@@ -1,61 +1,68 @@
 """
-`record_trade` has evolved across three stages — this is the final version
-to implement:
-  - Stage 1: append to `trades`, upsert `positions`, MySQL-only (no Redis,
-    no Kafka producer — everything else is derived via CDC).
-  - Stage 7: real weighted-average cost-basis math (see below), computed
-    here rather than in the CDC consumer, which stays math-free.
-  - Stage 8 (this stage): make the read-modify-write safe under concurrent
-    trades on the same position.
+Trade-write path (design doc §1).
 
-STAGE 8 EXERCISE — add `SELECT ... FOR UPDATE`.
+A trade write is MySQL's problem alone: this module appends to `trades` and
+upserts `positions` in one transaction, and touches nothing else — no
+Redis, no Kafka producer, no symbol -> clients index. Everything downstream
+is *derived* from this one write via CDC off the binlog, so there's no
+second write that can race or fail independently (the dual-write bug).
 
-Design doc §8: two buy orders for the same client+symbol arrive
-milliseconds apart, hit two different app server instances. Both do a
-read-modify-write on the same position row — both read the same old
-`(qty, avg_price)` before either writes back, both compute their new
-average off stale data, and one write clobbers the other. Classic **lost
-update**.
-
-**Rejected alternative**: route all trades for a given symbol to the same
-app instance (application-level partitioning). Works, but adds
-routing/rebalancing/hot-key complexity to solve a problem the database
-already has a tool for.
-
-**Fix**: wrap the read + compute + write in one transaction, and take a
-row-level exclusive lock at read time with `SELECT ... FOR UPDATE`. A
-second concurrent transaction touching the same `(client_id, symbol)` row
-blocks until the first commits, then reads the row it just wrote — not a
-stale value. Mutual exclusion handled at the source of truth, no
-application-level coordination needed.
-
-What to implement:
-1. Open a transaction (`conn.begin()` / disable autocommit for the
-   connection, matching your `asyncmy` pool's transaction API).
-2. `INSERT INTO trades (...) VALUES (...)`.
-3. `SELECT quantity, avg_buy_price FROM positions WHERE client_id=%s AND
-   symbol=%s FOR UPDATE` — if no row, treat as `(0, 0)` (you'll still need
-   an `INSERT` for the first trade on a position; `INSERT ... ON DUPLICATE
-   KEY UPDATE` after computing the new values works, or a separate
-   INSERT/UPDATE branch).
-4. Compute `new_quantity` / `new_avg_buy_price` per the Stage 7 rules
-   (weighted average on BUY, unchanged average + decreased quantity on
-   SELL, reject a SELL that would go negative).
-5. Write the position row.
-6. Commit. On any error, roll back.
-
-Verify this actually fixes the race (not just "looks right") by running the
-Stage 8 concurrency test — it fires many concurrent buys for the same
-position and checks the final quantity is exactly the sum of all trade
-quantities, every time.
+Stage 1 version: the `positions` upsert is deliberately naive — it adds the
+signed quantity and overwrites `avg_buy_price` with the latest trade price.
+Stage 7 replaces this with real weighted-average cost-basis math, and Stage
+8 makes the read-modify-write safe under concurrent trades.
 """
 from __future__ import annotations
 
-from pnl.common.events import Trade
+from datetime import datetime, timezone
+
+from pnl.common.events import Side, Trade
 from pnl.db.mysql import get_pool
+
+_INSERT_TRADE = (
+    "INSERT INTO trades (client_id, symbol, side, quantity, price, event_time) "
+    "VALUES (%s, %s, %s, %s, %s, %s)"
+)
+
+_UPSERT_POSITION = (
+    "INSERT INTO positions (client_id, symbol, quantity, avg_buy_price) "
+    "VALUES (%s, %s, %s, %s) "
+    "ON DUPLICATE KEY UPDATE quantity = quantity + VALUES(quantity), "
+    "avg_buy_price = VALUES(avg_buy_price)"
+)
+
+
+def _to_mysql_datetime(value: datetime) -> datetime:
+    """DATETIME columns carry no zone; store everything as naive UTC."""
+    if value.tzinfo is not None:
+        value = value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
 
 
 async def record_trade(trade: Trade) -> None:
-    raise NotImplementedError(
-        "Stage 8: implement record_trade with SELECT ... FOR UPDATE for concurrency safety"
-    )
+    signed_quantity = trade.quantity if trade.side is Side.BUY else -trade.quantity
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.begin()
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    _INSERT_TRADE,
+                    (
+                        trade.client_id,
+                        trade.symbol,
+                        trade.side.value,
+                        trade.quantity,
+                        trade.price,
+                        _to_mysql_datetime(trade.event_time),
+                    ),
+                )
+                await cur.execute(
+                    _UPSERT_POSITION,
+                    (trade.client_id, trade.symbol, signed_quantity, trade.price),
+                )
+            await conn.commit()
+        except BaseException:
+            await conn.rollback()
+            raise
