@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     mysql_user: str = "pnl"
     mysql_password: str = "pnl"
     mysql_db: str = "pnl"
+    mysql_pool_max_size: int = 20
 
     redis_host: str = "localhost"
     redis_port: int = 6379
