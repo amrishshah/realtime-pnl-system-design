@@ -66,11 +66,17 @@ async def test_counting_bloom_filter_survives_the_same_collision():
 
     await bloom.remove(symbol_a)
 
-    assert not await bloom.might_contain(symbol_a)
+    # symbol_a still reading "maybe held" here is an ordinary false positive:
+    # with one shared slot the filter can't tell the two apart. What matters
+    # is that symbol_b, which really is still held, survives.
     assert await bloom.might_contain(symbol_b), (
         "removing symbol_a incorrectly broke symbol_b even though their "
         "shared counter should only decrement (2 -> 1), not clear to 0"
     )
+
+    await bloom.remove(symbol_b)
+    assert not await bloom.might_contain(symbol_a)
+    assert not await bloom.might_contain(symbol_b)
 
     await r.delete(key)
     await r.aclose()

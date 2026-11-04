@@ -6,6 +6,9 @@ This projector is a pure, stateless propagator: it never computes a
 weighted average or any other business logic. It copies whatever MySQL
 already decided — the trade service owns cost-basis math (Stage 7). Keep it
 that way: a static test guards against arithmetic creeping in here.
+
+Index membership and Bloom-filter cleanup on a full sell are the symbol
+index projector's job, not this one's.
 """
 from __future__ import annotations
 
@@ -13,18 +16,14 @@ import logging
 
 import redis.asyncio as redis
 
-from pnl.cache.bloom import CountingBloomFilter
 from pnl.cache.position_cache import position_key
 
 logger = logging.getLogger(__name__)
 
 
 class PositionCacheProjector:
-    def __init__(
-        self, redis_client: redis.Redis, bloom: CountingBloomFilter | None = None
-    ) -> None:
+    def __init__(self, redis_client: redis.Redis) -> None:
         self.redis = redis_client
-        self.bloom = bloom
 
     async def handle(self, event: dict) -> None:
         after = event.get("after")

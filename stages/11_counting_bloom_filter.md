@@ -16,26 +16,37 @@ cleared to 0, so it correctly stays "positive" for whichever symbol still
 needs it. Only when a counter reaches 0 does that slot genuinely mean
 "nothing hashes here anymore."
 
-## A subtlety this stage surfaces
-Correctness now depends on `add`/`remove` being called **exactly once per
-logical membership** joining/leaving — not once per trade. `pnl/cdc/
-symbol_index_projector.py` is revisited to guard `bloom.add()` behind
-Redis `SADD`'s return value (it tells you whether the client was actually
-new to that symbol's set), and `pnl/cdc/position_cache_projector.py` calls
-`bloom.remove()` once per full-exit event. Get this balance right and the
-counters self-correct: a symbol held by N clients has a slot count that
-stays positive until the Nth (last) exit.
+## Three subtleties this stage surfaces
+1. **Entries and exits must come from one ordered stream.** Up to Stage 10
+   the index was fed from `trades`; a full exit is only visible on
+   `positions`. Kafka orders events within a partition, not across topics,
+   so buy → sell-all → buy-again could see the exit land *after* the
+   re-entry and silently drop a client who still holds the position. The
+   symbol index projector now reads `positions`: `quantity > 0` joins,
+   `quantity == 0` (or a deleted row) leaves. Debezium keys those events by
+   primary key, so one (client, symbol)'s events stay in order.
+2. **Counters must equal index membership, exactly.** Count one per
+   (client, symbol) holding — not one per trade, and not one per distinct
+   symbol. `join`/`leave` change the index SET and the counters in one Lua
+   script, and only when membership actually changes, so a crash between
+   the two writes can't desync them and a redelivered event is a no-op.
+3. **Rebuilds count holders and swap atomically.** `rebuild_from_positions`
+   counts holders per symbol (a `SELECT DISTINCT` rebuild would give a
+   3-holder symbol a count of 1, and the first exit would zero it). It
+   builds into a temp key and `RENAME`s it into place, so readers never see
+   an empty filter mid-rebuild. Run it while CDC projection is paused.
 
 ## What you're building
-- **`pnl/cache/bloom.py::CountingBloomFilter`** (subclasses `BloomFilter`)
-  — implement `add`, `might_contain` (overriding the bit-array versions
-  with counter-based ones), `remove`, and `rebuild_from_positions`.
-- Revisit **`pnl/cdc/symbol_index_projector.py`** — guard `bloom.add()` on
-  `SADD`'s return value.
-- Revisit **`pnl/cdc/position_cache_projector.py`** — on a full-exit event
-  (`quantity == 0`), `SREM` the symbol index and `bloom.remove(symbol)`.
-- `pnl/cdc/main.py` and `pnl/main.py` (provided) now construct a
-  `CountingBloomFilter` instead of a plain `BloomFilter` everywhere.
+- **`pnl/cache/bloom.py::CountingBloomFilter`** — counter-per-slot `add`,
+  `might_contain`, `remove` (never below zero; underflow is logged), atomic
+  `join`/`leave`, and `rebuild`/`rebuild_from_positions`.
+- **`pnl/cdc/symbol_index_projector.py`** — consumes `positions`, joins or
+  leaves by quantity, and drops a closed position from the client's
+  reconnect snapshot.
+- `pnl/cdc/position_cache_projector.py` stays a pure mirror.
+- `pnl/cdc/main.py` seeds the counting filter from the index on first start
+  (new key, since the Stage 3 filter was a bit array); both entrypoints
+  share it via `symbols_bloom()`.
 
 ## Run it
 ```bash
@@ -50,7 +61,8 @@ pytest tests/stage11
   (naive bit-clearing breaks a colliding symbol), then shows
   `CountingBloomFilter` survives the identical collision via decrement.
 - `test_bloom_rebuild.py` — rebuilding from MySQL matches exactly the
-  symbols with a nonzero held quantity.
-- `test_projector_cleanup.py` — a sole holder's full exit removes the
-  symbol from the filter; a full exit while another client still holds it
-  leaves the filter correctly positive.
+  symbols with a nonzero held quantity, counting each holder.
+- `test_projector_cleanup.py` — sole-holder exit clears the symbol; an exit
+  while another client holds it doesn't; redelivered joins/exits don't skew
+  counts; exit-then-re-entry stays indexed; a deleted row is an exit; a
+  closed position leaves the reconnect snapshot.

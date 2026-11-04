@@ -21,6 +21,12 @@ class Settings(BaseSettings):
     clickhouse_host: str = "localhost"
     clickhouse_port: int = 8123
 
+    # New key name: the Stage 3 plain filter used "bloom:symbols" as a bit
+    # array (a Redis STRING); the counting filter is a HASH.
+    bloom_key: str = "bloom:symbols:counting"
+    bloom_size_bits: int = 1_000_000
+    bloom_num_hashes: int = 7
+
     fanout_max_concurrency: int = 500
     fanout_client_timeout_seconds: float = 5.0
     coalescer_max_drain_wait_seconds: float = 1.0

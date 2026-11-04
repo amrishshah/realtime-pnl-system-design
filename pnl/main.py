@@ -8,7 +8,7 @@ from decimal import Decimal
 import clickhouse_connect
 from fastapi import FastAPI, HTTPException
 
-from pnl.cache.bloom import BloomFilter
+from pnl.cache.bloom import symbols_bloom
 from pnl.cache.position_cache import PositionCache
 from pnl.cache.reconnect_cache import ReconnectCache
 from pnl.cache.redis_client import get_redis
@@ -27,10 +27,6 @@ from pnl.ws.server import set_tick_handler
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("pnl")
 
-BLOOM_KEY = "bloom:symbols"
-BLOOM_SIZE_BITS = 1_000_000
-BLOOM_NUM_HASHES = 7
-
 _dispatcher = None
 
 
@@ -44,7 +40,7 @@ async def lifespan(app: FastAPI):
         host=settings.clickhouse_host, port=settings.clickhouse_port
     )
 
-    bloom = BloomFilter(redis_client, BLOOM_KEY, BLOOM_SIZE_BITS, BLOOM_NUM_HASHES)
+    bloom = symbols_bloom(redis_client)
     position_cache = PositionCache(redis_client, pool)
     reconnect_cache = ReconnectCache(redis_client)
     connection_manager = ConnectionManager()
